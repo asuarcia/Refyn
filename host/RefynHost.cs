@@ -1,4 +1,4 @@
-// PromptsmithHost — the input layer for Promptsmith.
+// RefynHost — the input layer for Refyn.
 //
 // Tray-resident Windows app: registers global hotkeys, lifts the current
 // selection out of whatever app has focus, sends it to the local daemon for
@@ -10,7 +10,7 @@
 // which is **C# 5 only**. No string interpolation, no null-conditional (?.),
 // no `out var`, no expression-bodied members, no nameof, no auto-property
 // initialisers. async/await and LINQ are fine. The payoff for that discipline
-// is that Promptsmith installs on any Windows machine with nothing to download:
+// is that Refyn installs on any Windows machine with nothing to download:
 // no .NET SDK, no runtime, no AutoHotkey. See host/build.ps1.
 
 using System;
@@ -26,7 +26,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace Promptsmith
+namespace Refyn
 {
     // ---------------------------------------------------------------- Program
 
@@ -36,13 +36,23 @@ namespace Promptsmith
         private static void Main(string[] args)
         {
             bool createdNew;
-            using (Mutex instanceLock = new Mutex(true, "Global\\PromptsmithHost", out createdNew))
+            using (Mutex instanceLock = new Mutex(true, "Global\\RefynHost", out createdNew))
             {
                 if (!createdNew)
                 {
+                    // A second launch is not an error — it is how `refyn
+                    // settings` reaches the copy that is already running. The
+                    // broadcast is the only channel available: the running
+                    // instance has no visible window to find, and a named pipe
+                    // would be a lot of machinery for one message.
+                    if (Array.IndexOf(args, "--settings") >= 0)
+                    {
+                        Native.PostMessage(Native.HWND_BROADCAST, Native.ShowSettingsMessage, IntPtr.Zero, IntPtr.Zero);
+                        return;
+                    }
                     MessageBox.Show(
-                        "Promptsmith is already running. Look for the tray icon near the clock.",
-                        "Promptsmith", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        "Refyn is already running. Look for the tray icon near the clock.",
+                        "Refyn", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
@@ -53,11 +63,11 @@ namespace Promptsmith
                 // .NET crash dialog and kill a background app the user cannot see.
                 Application.ThreadException += delegate(object s, System.Threading.ThreadExceptionEventArgs e)
                 {
-                    Tray.Balloon("Promptsmith error", e.Exception.Message, ToolTipIcon.Error);
+                    Tray.Balloon("Refyn error", e.Exception.Message, ToolTipIcon.Error);
                 };
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
-                Application.Run(new PromptsmithContext());
+                Application.Run(new RefynContext());
                 GC.KeepAlive(instanceLock);
             }
         }
@@ -65,7 +75,7 @@ namespace Promptsmith
 
     // ------------------------------------------------------- Application core
 
-    internal sealed class PromptsmithContext : ApplicationContext
+    internal sealed class RefynContext : ApplicationContext
     {
         private const int HotkeyImprove = 1;
         private const int HotkeyCompose = 2;
@@ -79,20 +89,23 @@ namespace Promptsmith
         private ToolStripMenuItem pauseItem;
         private ContextMenuStrip stylePicker;
         private ComposeForm compose;
+        private SettingsForm settings;
+        private Theme palette;
 
         private List<StyleInfo> styles;
         private string lastStyle;
         private bool busy;
         private bool paused;
 
-        public PromptsmithContext()
+        public RefynContext()
         {
             config = Config.Load();
-            lastStyle = "improve";
+            palette = Theme.Resolve(config.ThemePreference);
+            lastStyle = config.DefaultStyle;
             styles = StyleInfo.Fallback();
             daemon = new DaemonClient(config.Port);
 
-            Log.Write("--- Promptsmith host starting, port " + config.Port + " ---");
+            Log.Write("--- Refyn host starting, port " + config.Port + " ---");
             foreground = new ForegroundTracker();
             hotkeys = new HotkeyWindow(OnHotkey);
             BuildTray();
@@ -109,7 +122,7 @@ namespace Promptsmith
         {
             tray = new NotifyIcon();
             tray.Icon = TrayIconFactory.Create(false);
-            tray.Text = "Promptsmith";
+            tray.Text = "Refyn";
             tray.Visible = true;
             tray.DoubleClick += delegate { ShowCompose(foreground.LastExternal); };
             tray.ContextMenuStrip = BuildMenu();
@@ -141,6 +154,10 @@ namespace Promptsmith
 
             menu.Items.Add(new ToolStripSeparator());
 
+            ToolStripMenuItem settingsItem = new ToolStripMenuItem("Settings…");
+            settingsItem.Click += delegate { ShowSettings(); };
+            menu.Items.Add(settingsItem);
+
             pauseItem = new ToolStripMenuItem("Pause hotkeys");
             pauseItem.CheckOnClick = true;
             pauseItem.Click += delegate
@@ -148,28 +165,13 @@ namespace Promptsmith
                 paused = pauseItem.Checked;
                 if (paused) { UnregisterAll(); } else { RegisterAll(); }
                 tray.Icon = TrayIconFactory.Create(paused);
-                tray.Text = paused ? "Promptsmith (paused)" : "Promptsmith";
+                tray.Text = paused ? "Refyn (paused)" : "Refyn";
             };
             menu.Items.Add(pauseItem);
 
-            ToolStripMenuItem folder = new ToolStripMenuItem("Open config folder");
-            folder.Click += delegate
-            {
-                try
-                {
-                    Directory.CreateDirectory(Config.Folder);
-                    System.Diagnostics.Process.Start("explorer.exe", Config.Folder);
-                }
-                catch (Exception ex)
-                {
-                    Tray.Balloon("Promptsmith", ex.Message, ToolTipIcon.Warning);
-                }
-            };
-            menu.Items.Add(folder);
-
             menu.Items.Add(new ToolStripSeparator());
 
-            ToolStripMenuItem quit = new ToolStripMenuItem("Quit Promptsmith");
+            ToolStripMenuItem quit = new ToolStripMenuItem("Quit Refyn");
             quit.Click += delegate { Shutdown(); };
             menu.Items.Add(quit);
 
@@ -235,7 +237,7 @@ namespace Promptsmith
             uint mods, vk;
             if (!Hotkey.Parse(combo, out mods, out vk))
             {
-                Tray.Balloon("Promptsmith", "Could not understand the hotkey \"" + combo +
+                Tray.Balloon("Refyn", "Could not understand the hotkey \"" + combo +
                     "\" in config.json. Using no hotkey for that action.", ToolTipIcon.Warning);
                 return;
             }
@@ -247,7 +249,7 @@ namespace Promptsmith
             {
                 Log.Write("FAILED to register " + combo + " (id " + id + ") err=" +
                           Marshal.GetLastWin32Error());
-                Tray.Balloon("Promptsmith",
+                Tray.Balloon("Refyn",
                     combo + " is already claimed by another program, so that action has no hotkey. " +
                     "Change it in config.json (tray menu \u2192 Open config folder).",
                     ToolTipIcon.Warning);
@@ -266,13 +268,14 @@ namespace Promptsmith
             try
             {
                 Log.Write("hotkey " + id + " received");
-                if (id == HotkeyImprove) { ImproveSelection(null, Native.GetForegroundWindow()); }
+                if (id == 0) { ShowSettings(); }
+                else if (id == HotkeyImprove) { ImproveSelection(null, Native.GetForegroundWindow()); }
                 else if (id == HotkeyCompose) { ShowCompose(Native.GetForegroundWindow()); }
                 else if (id == HotkeyStyles) { ShowStylePicker(); }
             }
             catch (Exception ex)
             {
-                Tray.Balloon("Promptsmith error", ex.Message, ToolTipIcon.Error);
+                Tray.Balloon("Refyn error", ex.Message, ToolTipIcon.Error);
             }
         }
 
@@ -359,7 +362,7 @@ namespace Promptsmith
 
                 if (!ClipboardSafe.TrySetText(rewritten))
                 {
-                    Tray.Balloon("Promptsmith", "Another program is holding the clipboard; could not paste.",
+                    Tray.Balloon("Refyn", "Another program is holding the clipboard; could not paste.",
                         ToolTipIcon.Warning);
                     return;
                 }
@@ -386,15 +389,15 @@ namespace Promptsmith
             catch (DaemonDownException)
             {
                 Log.Write("improve: DAEMON DOWN");
-                Tray.Balloon("Promptsmith",
-                    "The Promptsmith daemon is not running. Start it with:  promptsmith start",
+                Tray.Balloon("Refyn",
+                    "The Refyn daemon is not running. Start it with:  refyn start",
                     ToolTipIcon.Error);
             }
             catch (Exception ex)
             {
                 // An error must never end up pasted into the user's document.
                 Log.Write("improve: ERROR " + ex.GetType().Name + ": " + ex.Message);
-                Tray.Balloon("Promptsmith", ex.Message, ToolTipIcon.Error);
+                Tray.Balloon("Refyn", ex.Message, ToolTipIcon.Error);
             }
             finally
             {
@@ -447,7 +450,7 @@ namespace Promptsmith
 
         private void SetWorking(bool working)
         {
-            tray.Text = working ? "Promptsmith: rewriting\u2026" : (paused ? "Promptsmith (paused)" : "Promptsmith");
+            tray.Text = working ? "Refyn: rewriting\u2026" : (paused ? "Refyn (paused)" : "Refyn");
         }
 
         // ------------------------------------------------------------ compose
@@ -456,9 +459,41 @@ namespace Promptsmith
         {
             if (compose == null || compose.IsDisposed)
             {
-                compose = new ComposeForm(daemon, styles);
+                compose = new ComposeForm(palette, daemon, styles);
             }
             compose.Open(returnTo, lastStyle);
+        }
+
+        private void ShowSettings()
+        {
+            // Rebuilt each time rather than reused: the theme, the style list
+            // and the daemon's model settings can all have changed since it was
+            // last shown, and a stale settings window is worse than none.
+            if (settings != null && !settings.IsDisposed)
+            {
+                settings.Close();
+                settings.Dispose();
+            }
+            palette = Theme.Resolve(config.ThemePreference);
+            settings = new SettingsForm(palette, config, daemon, OnSettingsSaved);
+            settings.Open();
+        }
+
+        /// <summary>
+        /// Applied without a restart where possible. Hotkeys are the exception:
+        /// re-registering them here would silently fail if the old combination
+        /// is still held, so those wait for the next launch.
+        /// </summary>
+        private void OnSettingsSaved(Config updated)
+        {
+            palette = Theme.Resolve(updated.ThemePreference);
+            lastStyle = updated.DefaultStyle;
+            tray.Icon = TrayIconFactory.Create(paused);
+            if (compose != null && !compose.IsDisposed)
+            {
+                compose.Dispose();
+                compose = null; // rebuilt with the new palette on next open
+            }
         }
 
         // ----------------------------------------------------------- teardown
@@ -505,6 +540,12 @@ namespace Promptsmith
             if (m.Msg == WM_HOTKEY)
             {
                 onHotkey(m.WParam.ToInt32());
+            }
+            else if (m.Msg == Native.ShowSettingsMessage)
+            {
+                // Hotkey id 0 is not registrable, so it is free to mean
+                // "open settings" without widening the callback signature.
+                onHotkey(0);
             }
             base.WndProc(ref m);
         }
@@ -590,244 +631,6 @@ namespace Promptsmith
         }
     }
 
-    // ----------------------------------------------------------- compose form
-
-    internal sealed class ComposeForm : Form
-    {
-        private readonly DaemonClient daemon;
-        private readonly TextBox input;
-        private readonly TextBox output;
-        private readonly ComboBox stylePicker;
-        private readonly Button rewriteButton;
-        private readonly Button pasteButton;
-        private readonly Label status;
-        private IntPtr returnTo;
-
-        public ComposeForm(DaemonClient client, List<StyleInfo> styles)
-        {
-            daemon = client;
-
-            Text = "Promptsmith";
-            Icon = TrayIconFactory.Create(false);
-            StartPosition = FormStartPosition.Manual;
-            FormBorderStyle = FormBorderStyle.Sizable;
-            MinimizeBox = false;
-            MaximizeBox = false;
-            ShowInTaskbar = false;
-            TopMost = true;
-            ClientSize = new Size(640, 460);
-            MinimumSize = new Size(460, 340);
-            KeyPreview = true;
-            Font = new Font("Segoe UI", 9.75f);
-            BackColor = Color.FromArgb(250, 250, 250);
-
-            TableLayoutPanel grid = new TableLayoutPanel();
-            grid.Dock = DockStyle.Fill;
-            grid.Padding = new Padding(12);
-            grid.ColumnCount = 1;
-            grid.RowCount = 5;
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 42f));
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 58f));
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-            input = new TextBox();
-            input.Multiline = true;
-            input.ScrollBars = ScrollBars.Vertical;
-            input.Dock = DockStyle.Fill;
-            input.AcceptsReturn = true;
-            input.Font = new Font("Consolas", 10f);
-            input.KeyDown += OnInputKeyDown;
-            grid.Controls.Add(input, 0, 0);
-
-            FlowLayoutPanel bar = new FlowLayoutPanel();
-            bar.Dock = DockStyle.Fill;
-            bar.AutoSize = true;
-            bar.Padding = new Padding(0, 8, 0, 8);
-            bar.WrapContents = false;
-
-            stylePicker = new ComboBox();
-            stylePicker.DropDownStyle = ComboBoxStyle.DropDownList;
-            stylePicker.Width = 170;
-            for (int i = 0; i < styles.Count; i++)
-            {
-                stylePicker.Items.Add(styles[i]);
-            }
-            if (stylePicker.Items.Count > 0) { stylePicker.SelectedIndex = 0; }
-            bar.Controls.Add(stylePicker);
-
-            rewriteButton = new Button();
-            rewriteButton.Text = "Rewrite  (Ctrl+Enter)";
-            rewriteButton.AutoSize = true;
-            rewriteButton.Margin = new Padding(8, 0, 0, 0);
-            rewriteButton.Click += delegate { RunRewrite(); };
-            bar.Controls.Add(rewriteButton);
-
-            status = new Label();
-            status.AutoSize = true;
-            status.Margin = new Padding(12, 6, 0, 0);
-            status.ForeColor = Color.FromArgb(110, 110, 110);
-            bar.Controls.Add(status);
-
-            grid.Controls.Add(bar, 0, 1);
-
-            output = new TextBox();
-            output.Multiline = true;
-            output.ReadOnly = true;
-            output.ScrollBars = ScrollBars.Vertical;
-            output.Dock = DockStyle.Fill;
-            output.Font = new Font("Consolas", 10f);
-            output.BackColor = Color.White;
-            grid.Controls.Add(output, 0, 2);
-
-            FlowLayoutPanel actions = new FlowLayoutPanel();
-            actions.Dock = DockStyle.Fill;
-            actions.AutoSize = true;
-            actions.FlowDirection = FlowDirection.RightToLeft;
-            actions.Padding = new Padding(0, 8, 0, 0);
-
-            Button close = new Button();
-            close.Text = "Close";
-            close.AutoSize = true;
-            close.Click += delegate { Hide(); };
-            actions.Controls.Add(close);
-
-            Button copy = new Button();
-            copy.Text = "Copy";
-            copy.AutoSize = true;
-            copy.Click += delegate { CopyOut(false); };
-            actions.Controls.Add(copy);
-
-            pasteButton = new Button();
-            pasteButton.Text = "Paste into last app";
-            pasteButton.AutoSize = true;
-            pasteButton.Click += delegate { CopyOut(true); };
-            actions.Controls.Add(pasteButton);
-
-            grid.Controls.Add(actions, 0, 3);
-
-            Label hint = new Label();
-            hint.AutoSize = true;
-            hint.ForeColor = Color.FromArgb(130, 130, 130);
-            hint.Text = "Esc closes.  Nothing here leaves your machine except the text you rewrite.";
-            grid.Controls.Add(hint, 0, 4);
-
-            Controls.Add(grid);
-
-            // Esc closes. Handled at the form because KeyPreview is on.
-            KeyDown += delegate(object s, KeyEventArgs e)
-            {
-                if (e.KeyCode == Keys.Escape) { Hide(); }
-            };
-        }
-
-        public void Open(IntPtr previousWindow, string preferredStyle)
-        {
-            returnTo = previousWindow;
-            pasteButton.Enabled = previousWindow != IntPtr.Zero;
-
-            for (int i = 0; i < stylePicker.Items.Count; i++)
-            {
-                StyleInfo s = stylePicker.Items[i] as StyleInfo;
-                if (s != null && s.Id == preferredStyle) { stylePicker.SelectedIndex = i; break; }
-            }
-
-            if (input.Text.Length == 0)
-            {
-                string clip;
-                if (ClipboardSafe.TryGetText(out clip) && clip.Trim().Length > 0 && clip.Length < 12000)
-                {
-                    input.Text = clip;
-                }
-            }
-
-            // Centre on whichever monitor the mouse is on, not the primary one.
-            Screen screen = Screen.FromPoint(Cursor.Position);
-            Location = new Point(
-                screen.WorkingArea.X + (screen.WorkingArea.Width - Width) / 2,
-                screen.WorkingArea.Y + (screen.WorkingArea.Height - Height) / 2);
-
-            Show();
-            Native.ForceForeground(Handle);
-            input.Focus();
-            input.SelectAll();
-        }
-
-        private void OnInputKeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.Control && (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Return))
-            {
-                e.SuppressKeyPress = true; // otherwise a newline lands in the box
-                RunRewrite();
-            }
-        }
-
-        private async void RunRewrite()
-        {
-            string text = input.Text.Trim();
-            if (text.Length == 0) { return; }
-
-            StyleInfo style = stylePicker.SelectedItem as StyleInfo;
-            string styleId = style != null ? style.Id : "improve";
-
-            rewriteButton.Enabled = false;
-            rewriteButton.Text = "Rewriting\u2026";
-            status.Text = "";
-            try
-            {
-                DateTime started = DateTime.UtcNow;
-                string result = await daemon.RewriteAsync(text, styleId);
-                output.Text = result;
-                status.Text = ((int)(DateTime.UtcNow - started).TotalMilliseconds) + " ms";
-            }
-            catch (DaemonDownException)
-            {
-                output.Text = "";
-                status.Text = "Daemon not running \u2014 start it with:  promptsmith start";
-            }
-            catch (Exception ex)
-            {
-                output.Text = "";
-                status.Text = ex.Message;
-            }
-            finally
-            {
-                rewriteButton.Enabled = true;
-                rewriteButton.Text = "Rewrite  (Ctrl+Enter)";
-            }
-        }
-
-        private async void CopyOut(bool paste)
-        {
-            if (output.Text.Length == 0) { return; }
-            if (!ClipboardSafe.TrySetText(output.Text))
-            {
-                status.Text = "Clipboard is locked by another program.";
-                return;
-            }
-            Hide();
-            if (paste && returnTo != IntPtr.Zero)
-            {
-                Native.ForceForeground(returnTo);
-                await Task.Delay(120);
-                Input.SendChord(Native.VK_CONTROL, Native.VK_V);
-            }
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            // Closing the window should not kill the tray app.
-            if (e.CloseReason == CloseReason.UserClosing)
-            {
-                e.Cancel = true;
-                Hide();
-                return;
-            }
-            base.OnFormClosing(e);
-        }
-    }
-
     // ---------------------------------------------------------- daemon client
 
     internal sealed class DaemonDownException : Exception
@@ -880,6 +683,45 @@ namespace Promptsmith
             return result;
         }
 
+        public async Task<DaemonSettings> GetSettingsAsync()
+        {
+            try
+            {
+                HttpResponseMessage response = await http.GetAsync("settings");
+                if (!response.IsSuccessStatusCode) { return null; }
+                string payload = await response.Content.ReadAsStringAsync();
+                DaemonSettings settings = new DaemonSettings();
+                settings.Model = Json.StringField(payload, "model");
+                settings.BaseUrl = Json.StringField(payload, "baseUrl");
+                settings.KeyMasked = Json.StringField(payload, "keyMasked");
+                settings.AppRoot = Json.StringField(payload, "appRoot");
+                settings.Node = Json.StringField(payload, "node");
+                settings.KeyConfigured = payload.Contains("\"keyConfigured\":true");
+                return settings;
+            }
+            catch (HttpRequestException) { return null; }
+            catch (TaskCanceledException) { return null; }
+        }
+
+        public async Task PutSettingsAsync(string model, string apiKey)
+        {
+            string body = "{\"model\":" + Json.Quote(model) + ",\"apiKey\":" + Json.Quote(apiKey) + "}";
+            HttpResponseMessage response;
+            try
+            {
+                StringContent content = new StringContent(body, Encoding.UTF8, "application/json");
+                response = await http.PostAsync("settings", content);
+            }
+            catch (HttpRequestException) { throw new DaemonDownException(); }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                string payload = await response.Content.ReadAsStringAsync();
+                string error = Json.StringField(payload, "error");
+                throw new Exception(error != null ? error : "Could not save model settings.");
+            }
+        }
+
         public async Task<List<StyleInfo>> GetStylesAsync()
         {
             try
@@ -898,6 +740,17 @@ namespace Promptsmith
                 return null;
             }
         }
+    }
+
+    /// <summary>What the daemon reports about the model side of the config.</summary>
+    internal sealed class DaemonSettings
+    {
+        public string Model;
+        public string BaseUrl;
+        public string KeyMasked;
+        public string AppRoot;
+        public string Node;
+        public bool KeyConfigured;
     }
 
     internal sealed class StyleInfo
@@ -1085,13 +938,15 @@ namespace Promptsmith
         public string HotkeyImprove = "Ctrl+Alt+P";
         public string HotkeyCompose = "Ctrl+Alt+O";
         public string HotkeyStyles = "Ctrl+Alt+L";
+        public string ThemePreference = "system";
+        public string DefaultStyle = "improve";
 
         public static string Folder
         {
             get
             {
                 return Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Promptsmith");
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Refyn");
             }
         }
 
@@ -1116,6 +971,8 @@ namespace Promptsmith
                 config.HotkeyImprove = Or(Json.StringField(json, "hotkeyImprove"), config.HotkeyImprove);
                 config.HotkeyCompose = Or(Json.StringField(json, "hotkeyCompose"), config.HotkeyCompose);
                 config.HotkeyStyles = Or(Json.StringField(json, "hotkeyStyles"), config.HotkeyStyles);
+                config.ThemePreference = Or(Json.StringField(json, "theme"), config.ThemePreference);
+                config.DefaultStyle = Or(Json.StringField(json, "defaultStyle"), config.DefaultStyle);
             }
             catch
             {
@@ -1127,6 +984,32 @@ namespace Promptsmith
         private static string Or(string value, string fallback)
         {
             return string.IsNullOrEmpty(value) ? fallback : value;
+        }
+
+        /// <summary>
+        /// Write config.json. Hand-rolled rather than serialised for the same
+        /// reason the reader is: no dependency may creep into a build that has
+        /// to work with nothing but csc.exe.
+        /// </summary>
+        public void Save()
+        {
+            Directory.CreateDirectory(Folder);
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.AppendLine("{");
+            sb.AppendLine("  \"port\": " + Port.ToString(CultureInfo.InvariantCulture) + ",");
+            sb.AppendLine("  \"hotkeyImprove\": " + Json.Quote(HotkeyImprove) + ",");
+            sb.AppendLine("  \"hotkeyCompose\": " + Json.Quote(HotkeyCompose) + ",");
+            sb.AppendLine("  \"hotkeyStyles\": " + Json.Quote(HotkeyStyles) + ",");
+            sb.AppendLine("  \"theme\": " + Json.Quote(ThemePreference) + ",");
+            sb.AppendLine("  \"defaultStyle\": " + Json.Quote(DefaultStyle));
+            sb.AppendLine("}");
+
+            // Write-then-rename: a half-written config.json would fall back to
+            // defaults on next launch and silently discard the user's hotkeys.
+            string temp = File_ + ".tmp";
+            System.IO.File.WriteAllText(temp, sb.ToString());
+            if (System.IO.File.Exists(File_)) { System.IO.File.Delete(File_); }
+            System.IO.File.Move(temp, File_);
         }
     }
 
@@ -1290,7 +1173,7 @@ namespace Promptsmith
     // ------------------------------------------------------------ tray helper
 
     /// <summary>
-    /// Append-only log at %APPDATA%\Promptsmith\host.log.
+    /// Append-only log at %APPDATA%\Refyn\host.log.
     ///
     /// A tray app has no console and no window most of the time, so when a
     /// hotkey silently does nothing there is otherwise no way at all to find
@@ -1513,6 +1396,22 @@ namespace Promptsmith
 
         [DllImport("kernel32.dll")]
         public static extern uint GetCurrentThreadId();
+
+        public static readonly IntPtr HWND_BROADCAST = new IntPtr(0xFFFF);
+
+        /// <summary>
+        /// A process-independent message id. RegisterWindowMessage returns the
+        /// same value for the same string in every process, which is what makes
+        /// a broadcast from a second instance land on the first.
+        /// </summary>
+        public static readonly int ShowSettingsMessage = RegisterWindowMessage("RefynShowSettings");
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int RegisterWindowMessage(string message);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         public delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hWnd,
                                               int objectId, int childId, uint eventThread, uint eventTime);

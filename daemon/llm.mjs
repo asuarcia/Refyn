@@ -27,12 +27,12 @@ export class LlmError extends Error {
 function config() {
   const apiKey = process.env.NIM_API_KEY;
   if (!apiKey) {
-    throw new LlmError("No API key. Put NIM_API_KEY in Promptsmith's .env file.");
+    throw new LlmError("No API key. Put NIM_API_KEY in Refyn's .env file.");
   }
   return {
     apiKey,
     baseUrl: (process.env.NIM_BASE_URL || DEFAULT_BASE).replace(/\/+$/, ""),
-    model: process.env.PROMPTSMITH_MODEL || DEFAULT_MODEL,
+    model: process.env.REFYN_MODEL || DEFAULT_MODEL,
   };
 }
 
@@ -148,9 +148,9 @@ function explainHttp(status, detail) {
     case 403:
       return "Inference endpoint rejected the API key (HTTP " + status + "). Check NIM_API_KEY in .env.";
     case 404:
-      return `Model not found (HTTP 404). ${process.env.PROMPTSMITH_MODEL || DEFAULT_MODEL} may have been retired — set PROMPTSMITH_MODEL to a live one.`;
+      return `Model not found (HTTP 404). ${process.env.REFYN_MODEL || DEFAULT_MODEL} may have been retired — set REFYN_MODEL to a live one.`;
     case 410:
-      return `Model reached end of life (HTTP 410). Set PROMPTSMITH_MODEL to a current model.`;
+      return `Model reached end of life (HTTP 410). Set REFYN_MODEL to a current model.`;
     case 429:
       return "Rate limited (HTTP 429). Wait a moment and try again.";
     default:

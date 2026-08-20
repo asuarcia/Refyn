@@ -107,7 +107,7 @@ $notepadExe = Join-Path $env:WINDIR 'System32\notepad.exe'
 # A unique name per run. Windows 11 Notepad restores unsaved tabs from previous
 # sessions, so a fixed filename means run N opens run N-1's edited buffer - the
 # title shows "*scratch.txt" and the content is last run's rewrite, not ours.
-$scratch    = Join-Path $env:TEMP ("promptsmith-e2e-" + [guid]::NewGuid().ToString("N").Substring(0,8) + ".txt")
+$scratch    = Join-Path $env:TEMP ("refyn-e2e-" + [guid]::NewGuid().ToString("N").Substring(0,8) + ".txt")
 
 function Get-Clip {
     for ($i = 0; $i -lt 12; $i++) {
@@ -122,26 +122,26 @@ function Get-Clip {
 
 function Cleanup {
     Get-Process Notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Get-ChildItem (Join-Path $env:TEMP "promptsmith-e2e-*.txt") -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem (Join-Path $env:TEMP "refyn-e2e-*.txt") -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
-# When no selection is found, Promptsmith opens its compose window — which is
+# When no selection is found, Refyn opens its compose window — which is
 # correct, but it is TopMost, so one left over from a previous run steals the
 # foreground and makes the NEXT run fail for an unrelated reason. Close it by
 # restarting the host, which is cheap and leaves no state behind.
 function Reset-Host {
-    if (Get-Process PromptsmithHost -ErrorAction SilentlyContinue) {
-        Stop-Process -Name PromptsmithHost -Force -ErrorAction SilentlyContinue
+    if (Get-Process RefynHost -ErrorAction SilentlyContinue) {
+        Stop-Process -Name RefynHost -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 500
     }
-    Start-Process (Join-Path $PSScriptRoot '../host/bin/PromptsmithHost.exe') -WindowStyle Hidden
+    Start-Process (Join-Path $PSScriptRoot '../host/bin/RefynHost.exe') -WindowStyle Hidden
     Start-Sleep -Seconds 2
 }
 
 function Fail($message) {
     Write-Host "FAIL: $message" -ForegroundColor Red
     Write-Host "--- host.log (last 20) ---" -ForegroundColor DarkGray
-    Get-Content (Join-Path $env:APPDATA 'Promptsmith\host.log') -ErrorAction SilentlyContinue | Select-Object -Last 20
+    Get-Content (Join-Path $env:APPDATA 'Refyn\host.log') -ErrorAction SilentlyContinue | Select-Object -Last 20
     Cleanup
     exit 1
 }
@@ -152,17 +152,17 @@ Write-Host "0. checking daemon and host are up" -ForegroundColor Cyan
 try {
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 3
 } catch {
-    Fail "daemon is not responding on port $port - run: node promptsmith.mjs start"
+    Fail "daemon is not responding on port $port - run: node refyn.mjs start"
 }
 # Always start from a known host state. Reset-Host both clears a compose window
 # left over from a previous run and starts the host if it is not up, so this
 # doubles as the "is it installed" check.
-if (-not (Test-Path (Join-Path $PSScriptRoot '../host/bin/PromptsmithHost.exe'))) {
-    Fail "PromptsmithHost.exe is not built - run: node promptsmith.mjs build"
+if (-not (Test-Path (Join-Path $PSScriptRoot '../host/bin/RefynHost.exe'))) {
+    Fail "RefynHost.exe is not built - run: node refyn.mjs build"
 }
 Reset-Host
-if (-not (Get-Process PromptsmithHost -ErrorAction SilentlyContinue)) {
-    Fail "PromptsmithHost.exe would not stay running"
+if (-not (Get-Process RefynHost -ErrorAction SilentlyContinue)) {
+    Fail "RefynHost.exe would not stay running"
 }
 if (-not $health.keyConfigured) { Fail "daemon has no API key configured" }
 $rewritesBefore = $health.rewrites
@@ -192,7 +192,7 @@ if (-not [Focus]::Grab($handle)) { Fail "could not bring Notepad to the foregrou
 Write-Host "   focused '$($editor.MainWindowTitle)' (hwnd $($handle.ToString('X')))" -ForegroundColor DarkGray
 
 # A test that cannot prove it selected anything cannot conclude anything about
-# the app. Earlier runs failed here and blamed Promptsmith, when the truth was
+# the app. Earlier runs failed here and blamed Refyn, when the truth was
 # that Ctrl+A never reached Notepad — the app was correctly reporting "nothing
 # was selected". So: select, copy, and verify the clipboard holds our text
 # BEFORE firing the hotkey. If this cannot be made to work, the harness is
@@ -228,7 +228,7 @@ for ($attempt = 1; $attempt -le 8; $attempt++) {
     Start-Sleep -Milliseconds 800
 }
 if (-not $primed) {
-    Fail "HARNESS: could not select text in Notepad, so the hotkey cannot be tested. This is a test-rig failure, not a Promptsmith failure."
+    Fail "HARNESS: could not select text in Notepad, so the hotkey cannot be tested. This is a test-rig failure, not a Refyn failure."
 }
 Write-Host "   selection verified" -ForegroundColor DarkGray
 

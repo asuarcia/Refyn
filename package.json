@@ -1,13 +1,13 @@
 {
-  "name": "promptsmith",
+  "name": "refyn",
   "version": "0.1.0",
   "description": "Always-on prompt rewriter. Select text anywhere on Windows, hit a hotkey, get a better prompt in place.",
   "type": "module",
-  "bin": { "promptsmith": "./promptsmith.mjs" },
+  "bin": { "refyn": "./refyn.mjs" },
   "scripts": {
-    "start": "node promptsmith.mjs start",
+    "start": "node refyn.mjs start",
     "daemon": "node daemon/server.mjs",
-    "build": "node promptsmith.mjs build",
+    "build": "node refyn.mjs build",
     "test": "node --test test/*.test.mjs"
   },
   "engines": { "node": ">=20.0.0" },

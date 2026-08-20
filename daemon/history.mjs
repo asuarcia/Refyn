@@ -14,7 +14,7 @@ import { appendFile, readFile, stat, rename } from "node:fs/promises";
 import path from "node:path";
 import { ROOT } from "./env.mjs";
 
-const FILE = process.env.PROMPTSMITH_HISTORY || path.join(ROOT, "history.jsonl");
+const FILE = process.env.REFYN_HISTORY || path.join(ROOT, "history.jsonl");
 /** Rotate at 5MB. One rolled file is kept; older history is not interesting. */
 const MAX_BYTES = 5 * 1024 * 1024;
 

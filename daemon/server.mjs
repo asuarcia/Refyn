@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Promptsmith daemon.
+ * Refyn daemon.
  *
  * A localhost HTTP service holding the API key, the styles, and the history.
- * The tray host (host/PromptsmithHost.cs) is the only expected client.
+ * The tray host (host/RefynHost.cs) is the only expected client.
  *
  * Why a separate process at all, rather than doing the HTTP call from C#:
  * the styles in styles.mjs are the part that gets tuned constantly, and a tray
@@ -19,10 +19,11 @@ import { loadEnv } from "./env.mjs";
 import { rewrite, LlmError, MAX_INPUT_CHARS } from "./llm.mjs";
 import { styleList, STYLES, DEFAULT_STYLE } from "./styles.mjs";
 import { appendHistory, readHistory } from "./history.mjs";
+import { readSettings, writeSettings } from "./settings.mjs";
 
 loadEnv();
 
-const PORT = Number(process.env.PROMPTSMITH_PORT) || 8477;
+const PORT = Number(process.env.REFYN_PORT) || 8477;
 const HOST = "127.0.0.1";
 /** Requests larger than this are rejected before being read into memory. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -36,7 +37,7 @@ const server = http.createServer(async (req, res) => {
     // reach 127.0.0.1. Reject cross-origin requests outright rather than
     // relying on CORS preflight, which does not cover simple POSTs.
     if (req.headers.origin) {
-      return send(res, 403, { error: "Promptsmith does not accept browser requests." });
+      return send(res, 403, { error: "Refyn does not accept browser requests." });
     }
 
     const url = new URL(req.url, `http://${HOST}:${PORT}`);
@@ -46,10 +47,21 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         uptimeSec: Math.round((Date.now() - started) / 1000),
         rewrites,
-        model: process.env.PROMPTSMITH_MODEL || "deepseek-ai/deepseek-v4-flash-0731",
+        model: process.env.REFYN_MODEL || "deepseek-ai/deepseek-v4-flash-0731",
         keyConfigured: Boolean(process.env.NIM_API_KEY),
         pid: process.pid,
       });
+    }
+
+    if (req.method === "GET" && url.pathname === "/settings") {
+      return send(res, 200, readSettings());
+    }
+
+    if (req.method === "POST" && url.pathname === "/settings") {
+      const patch = await readJson(req);
+      const changed = writeSettings(patch);
+      if (changed.length) log("settings updated:", changed.join(", "));
+      return send(res, 200, { ok: true, changed, ...readSettings() });
     }
 
     if (req.method === "GET" && url.pathname === "/styles") {
@@ -142,7 +154,7 @@ function log(...args) {
 
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    console.error(`Port ${PORT} is already in use — Promptsmith may already be running.`);
+    console.error(`Port ${PORT} is already in use — Refyn may already be running.`);
     process.exit(2);
   }
   console.error(err);
@@ -150,7 +162,7 @@ server.on("error", (err) => {
 });
 
 server.listen(PORT, HOST, () => {
-  log(`Promptsmith daemon on http://${HOST}:${PORT}`);
+  log(`Refyn daemon on http://${HOST}:${PORT}`);
   if (!process.env.NIM_API_KEY) {
     log("WARNING: NIM_API_KEY is not set. Rewrites will fail until it is in .env.");
   }

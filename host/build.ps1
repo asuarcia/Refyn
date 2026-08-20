@@ -1,17 +1,18 @@
-# Builds PromptsmithHost.exe with the .NET Framework compiler that is already
+# Builds RefynHost.exe with the .NET Framework compiler that is already
 # on every Windows machine. No SDK, no NuGet, no toolchain to install.
 #
 #   powershell -ExecutionPolicy Bypass -File host\build.ps1
 #
-# Output: host\bin\PromptsmithHost.exe (a single self-contained ~50KB exe).
+# Output: host\bin\RefynHost.exe (a single self-contained ~50KB exe).
 
 $ErrorActionPreference = 'Stop'
 
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$source  = Join-Path $here 'PromptsmithHost.cs'
+# All three sources compile as one assembly; csc takes them positionally.
+$sources = @('RefynHost.cs','RefynUi.cs','RefynWindows.cs') | ForEach-Object { Join-Path $here $_ }
 $manifest= Join-Path $here 'app.manifest'
 $outDir  = Join-Path $here 'bin'
-$outExe  = Join-Path $outDir 'PromptsmithHost.exe'
+$outExe  = Join-Path $outDir 'RefynHost.exe'
 
 # Prefer the 64-bit compiler, but a 32-bit-only Windows still has the other one.
 $candidates = @(
@@ -43,7 +44,7 @@ $compilerArgs = @(
   '/warn:4',
   "/out:$outExe",
   "/win32manifest:$manifest"
-) + ($refs | ForEach-Object { "/reference:$_" }) + @($source)
+) + ($refs | ForEach-Object { "/reference:$_" }) + $sources
 
 Write-Host "Compiling with $csc" -ForegroundColor DarkGray
 & $csc @compilerArgs

@@ -102,7 +102,7 @@ test("an unknown style falls back to the default rather than throwing", () => {
 test("loadEnv parses CRLF files without gluing \\r onto values", () => {
   // The bug this guards against is invisible: the key parses "successfully",
   // then every API call 401s because the header ends in a carriage return.
-  const dir = mkdtempSync(path.join(tmpdir(), "promptsmith-env-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "refyn-env-"));
   const file = path.join(dir, ".env");
   writeFileSync(file, "PS_TEST_KEY=abc123\r\nPS_TEST_URL=https://example.com/v1\r\n");
 
@@ -115,7 +115,7 @@ test("loadEnv parses CRLF files without gluing \\r onto values", () => {
 });
 
 test("loadEnv strips surrounding quotes and ignores comments", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "promptsmith-env-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "refyn-env-"));
   const file = path.join(dir, ".env");
   writeFileSync(file, ['# a comment', 'PS_TEST_QUOTED="quoted value"', "PS_TEST_PLAIN=plain"].join("\n"));
 
@@ -128,7 +128,7 @@ test("loadEnv strips surrounding quotes and ignores comments", () => {
 });
 
 test("loadEnv never overrides a real environment variable", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "promptsmith-env-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "refyn-env-"));
   const file = path.join(dir, ".env");
   writeFileSync(file, "PS_TEST_PRESET=from-file\n");
 
@@ -138,5 +138,5 @@ test("loadEnv never overrides a real environment variable", () => {
 });
 
 test("loadEnv on a missing file is a no-op, not a throw", () => {
-  assert.equal(loadEnv(path.join(tmpdir(), "definitely-not-here-promptsmith", ".env")), false);
+  assert.equal(loadEnv(path.join(tmpdir(), "definitely-not-here-refyn", ".env")), false);
 });

@@ -1,4 +1,4 @@
-# Promptsmith
+# Refyn
 
 Select a sloppy prompt anywhere on Windows, press **Ctrl+Alt+P**, and it is
 replaced in place by a better one.
@@ -26,7 +26,7 @@ selection through the OS, so a single install covers every app on the machine.
 
 The one place in-place replacement genuinely cannot work is a terminal: there is
 no "selection" on a shell input line to paste over, and sending Ctrl+C to a
-console is SIGINT, which would kill whatever you are running. Promptsmith
+console is SIGINT, which would kill whatever you are running. Refyn
 detects a terminal by its window class and opens the compose window instead —
 type or paste there, get the rewrite, and it is copied ready to paste.
 
@@ -39,9 +39,9 @@ compiler already present on every Windows install. No .NET SDK, no NuGet, no
 AutoHotkey.
 
 ```powershell
-git clone <this repo> && cd Promptsmith
+git clone <this repo> && cd Refyn
 cp .env.example .env      # then put your API key in it
-node promptsmith.mjs start
+node refyn.mjs start
 ```
 
 `start` builds the tray host on first run, launches the daemon, and puts a
@@ -50,7 +50,7 @@ node promptsmith.mjs start
 To have it come back after a reboot:
 
 ```powershell
-node promptsmith.mjs autostart on
+node refyn.mjs autostart on
 ```
 
 ---
@@ -64,11 +64,39 @@ node promptsmith.mjs autostart on
 | `Ctrl+Alt+L` | Pick a style for the current selection |
 
 With nothing selected, `Ctrl+Alt+P` opens the compose window rather than doing
-nothing. Change any of these in `%APPDATA%\Promptsmith\config.json`:
+nothing.
 
-```json
-{ "port": 8477, "hotkeyImprove": "Ctrl+Alt+P", "hotkeyCompose": "Ctrl+Alt+O", "hotkeyStyles": "Ctrl+Alt+L" }
-```
+---
+
+## Settings
+
+Three ways in, all the same window:
+
+- **right-click the tray icon → Settings…**
+- **`refyn settings`** from a terminal
+- double-click the tray icon opens Compose; Settings is one menu item away
+
+It covers hotkeys (click a field and press the combination you want), theme,
+the model and API key, the default style, the port, and run-at-login. Hotkey
+changes take effect on the next launch; everything else applies immediately.
+
+Settings are split across two files by owner, and the window writes both:
+
+| File | Holds | Written by |
+|---|---|---|
+| `%APPDATA%\Refyn\config.json` | hotkeys, theme, default style, port | the tray app |
+| `.env` in the repo | model, endpoint, API key | the daemon |
+
+The daemon owns the key because it is the only process that should ever hold
+one. It rewrites `.env` line by line, so your comments and any extra variables
+survive, and it keeps a `.env.bak` the first time it touches the file.
+
+### Theme
+
+**System**, **Light**, or **Dark**. System follows the Windows app theme, and
+the choice previews live before you save it. Both windows are painted by hand —
+stock WinForms has no dark mode at all, and its dropdowns stay bright white on
+a dark form no matter what you set `BackColor` to.
 
 ---
 
@@ -97,10 +125,10 @@ Editing a style takes effect on the next daemon restart. No recompile.
 ## From the terminal
 
 ```bash
-promptsmith rewrite "make a thing that sorts stuff" --style code
-cat rough-draft.txt | promptsmith rewrite --style concise
-promptsmith status      # what is running, plus a live end-to-end key check
-promptsmith history 5   # recent rewrites, with what went in and what came out
+refyn rewrite "make a thing that sorts stuff" --style code
+cat rough-draft.txt | refyn rewrite --style concise
+refyn status      # what is running, plus a live end-to-end key check
+refyn history 5   # recent rewrites, with what went in and what came out
 ```
 
 ---
@@ -111,7 +139,7 @@ promptsmith history 5   # recent rewrites, with what went in and what came out
   keypress
      │
      ▼
-  PromptsmithHost.exe  (C#, tray, ~40KB)
+  RefynHost.exe  (C#, tray, ~40KB)
      │   releases your held modifiers, sends Ctrl+C,
      │   waits for the clipboard sequence number to move
      ▼
@@ -145,7 +173,7 @@ returned. It verifies its own preconditions first: if it cannot prove it
 selected text, it reports a harness failure rather than blaming the app — an
 earlier version did the opposite and produced a confident false PASS.
 
-When something goes wrong, `%APPDATA%\Promptsmith\host.log` has one line per
+When something goes wrong, `%APPDATA%\Refyn\host.log` has one line per
 step of the last session, which is the only way to see inside a tray app with
 no console.
 
@@ -157,10 +185,10 @@ no console.
 `FAILED to register`, another program owns that combo — change it in
 `config.json`. If it says `nothing was selected`, the copy did not take.
 
-**"daemon is not running".** `promptsmith status`, then `promptsmith start`.
+**"daemon is not running".** `refyn status`, then `refyn start`.
 
 **Rewrites fail with HTTP 404 or 410.** The model was retired. Set
-`PROMPTSMITH_MODEL` in `.env` to a current one.
+`REFYN_MODEL` in `.env` to a current one.
 
 **The selection is too big.** There is a 12,000 character ceiling; past that you
 have almost certainly selected a whole document by accident.
