@@ -1,0 +1,15 @@
+{
+  "name": "promptsmith",
+  "version": "0.1.0",
+  "description": "Always-on prompt rewriter. Select text anywhere on Windows, hit a hotkey, get a better prompt in place.",
+  "type": "module",
+  "bin": { "promptsmith": "./promptsmith.mjs" },
+  "scripts": {
+    "start": "node promptsmith.mjs start",
+    "daemon": "node daemon/server.mjs",
+    "build": "node promptsmith.mjs build",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20.0.0" },
+  "dependencies": {}
+}
