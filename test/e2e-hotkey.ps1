@@ -26,7 +26,34 @@
 # a rewriter. The daemon must have received OUR text, and the window must end up
 # holding exactly what the daemon returned.
 
+#
+# THIS TEST TAKES OVER THE DESKTOP.
+#
+# It opens Notepad, forces it to the foreground, and synthesises keystrokes into
+# it for about a minute. You cannot use the machine while it runs — anything you
+# type goes into whatever it has focused. It is therefore opt-in:
+#
+#   powershell -ExecutionPolicy Bypass -File test\e2e-hotkey.ps1 -TakeOverMyDesktop
+#
+# Run it when you are away from the keyboard. For routine checks use the quiet
+# suites instead, which touch nothing on screen:
+#
+#   node --test test\*.test.mjs        daemon logic
+#   node test\smoke.mjs                daemon + host over HTTP, no windows
+#
+param([switch]$TakeOverMyDesktop)
+
 $ErrorActionPreference = 'Stop'
+
+if (-not $TakeOverMyDesktop) {
+    Write-Host ""
+    Write-Host "  This test hijacks the keyboard and focus for ~1 minute." -ForegroundColor Yellow
+    Write-Host "  Re-run with -TakeOverMyDesktop when you are away from the machine." -ForegroundColor Yellow
+    Write-Host "  For a quiet check: node --test test\*.test.mjs  and  node test\smoke.mjs" -ForegroundColor DarkGray
+    Write-Host ""
+    exit 2
+}
+
 Add-Type -AssemblyName System.Windows.Forms
 
 Add-Type @'
@@ -39,8 +66,10 @@ public static class Focus {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll", SetLastError = true)]
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
     static extern bool SystemParametersInfo(uint action, uint param, IntPtr value, uint winIni);
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", SetLastError = true)]
+    static extern bool SystemParametersInfoGet(uint action, uint param, ref uint value, uint winIni);
 
     const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000;
     const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
@@ -67,8 +96,18 @@ public static class Focus {
         return name + " '" + title.ToString() + "'";
     }
 
-    public static void UnlockForeground() {
-        SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, SPIF_SENDCHANGE);
+    // NOTE: the value goes in pvParam and uiParam must be zero. Passing it in
+    // uiParam sets the timeout to 0 no matter what you intended — which is how
+    // an earlier version of this file left the machine letting every app steal
+    // focus, long after the test had finished.
+    public static uint GetForegroundLockTimeout() {
+        uint v = 0;
+        SystemParametersInfoGet(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, ref v, 0);
+        return v;
+    }
+
+    public static void SetForegroundLockTimeout(uint ms) {
+        SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, new IntPtr(ms), SPIF_SENDCHANGE);
     }
 
     // Windows refuses SetForegroundWindow from a process that does not already
@@ -123,7 +162,19 @@ function Get-Clip {
 function Cleanup {
     Get-Process Notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Get-ChildItem (Join-Path $env:TEMP "refyn-e2e-*.txt") -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+    # Always put the foreground lock back. Leaving it at 0 lets every app on the
+    # machine steal focus for the rest of the session, which outlives this test
+    # and is not the test's to decide.
+    if ($null -ne $script:savedLockTimeout) {
+        [Focus]::SetForegroundLockTimeout($script:savedLockTimeout)
+        $script:savedLockTimeout = $null
+    }
 }
+
+# Runs even on Ctrl+C or an unhandled error, which a plain call at the end
+# of the script would not.
+trap { Cleanup; break }
 
 # When no selection is found, Refyn opens its compose window — which is
 # correct, but it is TopMost, so one left over from a previous run steals the
@@ -171,7 +222,8 @@ if (-not (Test-Path $notepadExe)) { Fail "no notepad.exe at $notepadExe" }
 
 # --- drive the UI -----------------------------------------------------------
 
-[Focus]::UnlockForeground()
+$script:savedLockTimeout = [Focus]::GetForegroundLockTimeout()
+[Focus]::SetForegroundLockTimeout(0)
 
 Write-Host "1. opening a scratch file in Notepad" -ForegroundColor Cyan
 Get-Process Notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -237,31 +289,56 @@ if (-not (Send-Verified $handle "^a")) { Fail "HARNESS: lost Notepad focus befor
 Start-Sleep -Milliseconds 400
 
 Write-Host "3. firing Ctrl+Alt+P (the real global hotkey)" -ForegroundColor Cyan
-[System.Windows.Forms.SendKeys]::SendWait("^%p")
-
-Write-Host "4. waiting for the rewrite to land" -ForegroundColor Cyan
+# Fire, then wait — retried as a unit.
+#
+# The hotkey is global, so it fires wherever focus is, but Refyn rewrites the
+# selection in the FOREGROUND window. On a busy desktop another app reclaims
+# focus in the gap between selecting and firing, and Refyn then faithfully looks
+# at the wrong window — the log shows `target=Chrome_WidgetWin_1` and
+# `captured NOTHING`, which is Refyn behaving correctly on a bad setup.
+#
+# So each attempt re-primes the selection and re-grabs focus. This is the
+# harness compensating for its environment, not the app being unreliable.
 $landed = $false
-for ($i = 0; $i -lt 40; $i++) {
-    Start-Sleep -Milliseconds 500
-    try {
-        $now = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2
-        if ($now.rewrites -gt $rewritesBefore) { $landed = $true; break }
-    } catch { }
+for ($attempt = 1; $attempt -le 3 -and -not $landed; $attempt++) {
+    if ($attempt -gt 1) {
+        Write-Host "   focus drifted; re-priming and retrying ($attempt/3)" -ForegroundColor DarkYellow
+        if (-not (Send-Verified $handle "^a")) { continue }
+        Start-Sleep -Milliseconds 400
+    }
+
+    if (-not (Send-Verified $handle "^%p")) { continue }
+
+    Write-Host "4. waiting for the rewrite to land" -ForegroundColor Cyan
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $now = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2
+            if ($now.rewrites -gt $rewritesBefore) { $landed = $true; break }
+        } catch { }
+    }
 }
 if (-not $landed) { Fail "the daemon never received a rewrite - the hotkey did not complete" }
 Start-Sleep -Seconds 2   # let the paste and the clipboard restore finish
 
 # --- verify -----------------------------------------------------------------
 
+# Reading the window back is itself a focus-dependent operation, so it gets the
+# same treatment as everything else: verified sends, and a retry, because a
+# readback that silently grabs the wrong window would report a paste bug that
+# the host log flatly contradicts.
 Write-Host "5. reading the window contents back" -ForegroundColor Cyan
-[System.Windows.Forms.Clipboard]::SetText("__sentinel__")
-Start-Sleep -Milliseconds 300
-[Focus]::Grab($handle) | Out-Null
-[System.Windows.Forms.SendKeys]::SendWait("^a")
-Start-Sleep -Milliseconds 300
-[System.Windows.Forms.SendKeys]::SendWait("^c")
-Start-Sleep -Milliseconds 900
-$final = (Get-Clip).Trim()
+$final = ""
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    [System.Windows.Forms.Clipboard]::SetText("__sentinel__")
+    Start-Sleep -Milliseconds 300
+    if (-not (Send-Verified $handle "^a")) { Start-Sleep -Milliseconds 400; continue }
+    Start-Sleep -Milliseconds 350
+    if (-not (Send-Verified $handle "^c")) { Start-Sleep -Milliseconds 400; continue }
+    Start-Sleep -Milliseconds 900
+    $final = (Get-Clip).Trim()
+    if ($final -ne "__sentinel__" -and $final.Length -gt 0) { break }
+}
 
 # Ground truth: what the daemon actually received and returned. The window and
 # the daemon have to agree, or something between them is broken.
@@ -283,7 +360,11 @@ if ($entry.input.Trim() -ne $original) {
 }
 if ($final -eq "__sentinel__" -or $final.Length -eq 0) { Fail "could not read the window contents back" }
 if ($final -eq $original)                              { Fail "text unchanged - the rewrite never pasted" }
-if ($final -ne $entry.output.Trim())                   { Fail "window does not hold what the daemon returned - the paste is wrong" }
+if ($final -ne $entry.output.Trim()) {
+    Fail ("window does not hold what the daemon returned - the paste is wrong" +
+          "`n  daemon returned: [" + $entry.output.Trim() + "]" +
+          "`n  window holds:    [" + $final + "]")
+}
 if ($final -notmatch '(?i)dns')                        { Fail "the rewrite lost the subject of the prompt" }
 
 Write-Host "PASS: selection was rewritten in place" -ForegroundColor Green

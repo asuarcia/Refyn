@@ -56,6 +56,15 @@ namespace Refyn
                     return;
                 }
 
+                // Icon design aid: render the real icon at the sizes Windows
+                // actually uses and exit. Eyeballing a 64px bitmap is how you
+                // ship a mark that turns into a blob in the tray.
+                if (Array.IndexOf(args, "--dump-icon") >= 0)
+                {
+                    TrayIconFactory.Dump(args[Array.IndexOf(args, "--dump-icon") + 1]);
+                    return;
+                }
+
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
@@ -308,7 +317,11 @@ namespace Refyn
         private async void ImproveSelection(string style, IntPtr target)
         {
             if (busy) { return; }
-            string chosen = style != null ? style : lastStyle;
+            // An explicit pick always wins. Otherwise fall back to the mode the
+            // user configured — or, if they asked for stickiness, whatever they
+            // picked last.
+            string chosen = style;
+            if (chosen == null) { chosen = config.RememberLastMode ? lastStyle : config.DefaultStyle; }
 
             if (target == IntPtr.Zero) { target = Native.GetForegroundWindow(); }
 
@@ -358,7 +371,7 @@ namespace Refyn
 
                 string rewritten = await daemon.RewriteAsync(selection, chosen);
                 Log.Write("improve: daemon returned " + rewritten.Length + " chars");
-                lastStyle = chosen;
+                if (config.RememberLastMode) { lastStyle = chosen; }
 
                 if (!ClipboardSafe.TrySetText(rewritten))
                 {
@@ -461,7 +474,7 @@ namespace Refyn
             {
                 compose = new ComposeForm(palette, daemon, styles);
             }
-            compose.Open(returnTo, lastStyle);
+            compose.Open(returnTo, config.RememberLastMode ? lastStyle : config.DefaultStyle);
         }
 
         private void ShowSettings()
@@ -899,6 +912,16 @@ namespace Refyn
             return null; // unterminated string
         }
 
+        /// <summary>Value of "key" as a bool, or `fallback`.</summary>
+        public static bool BoolField(string json, string key, bool fallback)
+        {
+            int valueStart = FindValue(json, key);
+            if (valueStart < 0) { return fallback; }
+            if (string.CompareOrdinal(json, valueStart, "true", 0, 4) == 0) { return true; }
+            if (string.CompareOrdinal(json, valueStart, "false", 0, 5) == 0) { return false; }
+            return fallback;
+        }
+
         /// <summary>Value of "key" as an int, or `fallback`.</summary>
         public static int IntField(string json, string key, int fallback)
         {
@@ -940,6 +963,16 @@ namespace Refyn
         public string HotkeyStyles = "Ctrl+Alt+L";
         public string ThemePreference = "system";
         public string DefaultStyle = "improve";
+        /// <summary>
+        /// When false (the default), every rewrite starts from DefaultStyle and
+        /// the style picker is a one-off override. When true, the last style
+        /// picked becomes the new default until Refyn restarts.
+        ///
+        /// This exists because the original behaviour was the second one with
+        /// no way to turn it off: picking a style once silently retired the
+        /// configured default, which made the setting look broken.
+        /// </summary>
+        public bool RememberLastMode = false;
 
         public static string Folder
         {
@@ -973,6 +1006,7 @@ namespace Refyn
                 config.HotkeyStyles = Or(Json.StringField(json, "hotkeyStyles"), config.HotkeyStyles);
                 config.ThemePreference = Or(Json.StringField(json, "theme"), config.ThemePreference);
                 config.DefaultStyle = Or(Json.StringField(json, "defaultStyle"), config.DefaultStyle);
+                config.RememberLastMode = Json.BoolField(json, "rememberLastMode", config.RememberLastMode);
             }
             catch
             {
@@ -1001,7 +1035,8 @@ namespace Refyn
             sb.AppendLine("  \"hotkeyCompose\": " + Json.Quote(HotkeyCompose) + ",");
             sb.AppendLine("  \"hotkeyStyles\": " + Json.Quote(HotkeyStyles) + ",");
             sb.AppendLine("  \"theme\": " + Json.Quote(ThemePreference) + ",");
-            sb.AppendLine("  \"defaultStyle\": " + Json.Quote(DefaultStyle));
+            sb.AppendLine("  \"defaultStyle\": " + Json.Quote(DefaultStyle) + ",");
+            sb.AppendLine("  \"rememberLastMode\": " + (RememberLastMode ? "true" : "false"));
             sb.AppendLine("}");
 
             // Write-then-rename: a half-written config.json would fall back to
@@ -1231,31 +1266,48 @@ namespace Refyn
     {
         /// <summary>
         /// Draws the icon rather than shipping an .ico, so the build stays a
-        /// single csc invocation over a single source file with no resources.
+        /// csc invocation over source files with no resources to embed.
+        ///
+        /// The mark is a four-point sparkle, not a letter. A glyph would be
+        /// unreadable at the 16px the tray actually renders at, and a letter
+        /// says nothing about what the app does; a sparkle is the established
+        /// "polish this" symbol and stays legible when it is eight pixels wide.
         /// </summary>
         public static Icon Create(bool paused)
         {
-            using (Bitmap bitmap = new Bitmap(32, 32))
+            // Rendered at 4x the tray's 16px and left for Windows to downscale:
+            // the curves stay smooth, and the same bitmap serves the 32px window
+            // icon and the larger sizes Alt-Tab asks for.
+            const int Size = 64;
+
+            using (Bitmap bitmap = new Bitmap(Size, Size))
             {
                 using (Graphics g = Graphics.FromImage(bitmap))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-                    Color fill = paused ? Color.FromArgb(120, 120, 120) : Color.FromArgb(196, 92, 60);
-                    using (GraphicsPath path = RoundedRect(new Rectangle(1, 1, 30, 30), 8))
+                    Color fill = paused ? Color.FromArgb(122, 128, 138) : Color.FromArgb(196, 92, 60);
+                    using (GraphicsPath path = RoundedRect(new Rectangle(2, 2, Size - 4, Size - 4), 15))
                     using (SolidBrush brush = new SolidBrush(fill))
                     {
                         g.FillPath(brush, path);
                     }
 
-                    using (Font font = new Font("Segoe UI", 17f, FontStyle.Bold, GraphicsUnit.Pixel))
-                    using (SolidBrush text = new SolidBrush(Color.White))
-                    using (StringFormat format = new StringFormat())
+                    // Main sparkle, sitting slightly low and left so the small
+                    // one has room without the pair looking off-centre.
+                    using (GraphicsPath spark = SparklePath(28f, 36f, 20f))
+                    using (SolidBrush brush = new SolidBrush(Color.White))
                     {
-                        format.Alignment = StringAlignment.Center;
-                        format.LineAlignment = StringAlignment.Center;
-                        g.DrawString("P", font, text, new RectangleF(0, 0, 32, 33), format);
+                        g.FillPath(brush, spark);
+                    }
+
+                    // Secondary sparkle. At 16px it resolves to a soft dot,
+                    // which still reads as "sparkle" rather than as noise.
+                    using (GraphicsPath spark = SparklePath(45f, 20f, 10f))
+                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(235, 255, 255, 255)))
+                    {
+                        g.FillPath(brush, spark);
                     }
                 }
 
@@ -1274,6 +1326,71 @@ namespace Refyn
                     Native.DestroyIcon(handle);
                 }
             }
+        }
+
+        /// <summary>
+        /// Write the icon out at tray/window/shell sizes, side by side and
+        /// magnified, so the mark can be judged at the size it is really seen.
+        /// </summary>
+        public static void Dump(string pngPath)
+        {
+            int[] sizes = new int[] { 16, 20, 24, 32, 48, 64 };
+            const int Zoom = 6;
+            const int Gap = 12;
+
+            int width = Gap;
+            for (int i = 0; i < sizes.Length; i++) { width += sizes[i] * Zoom + Gap; }
+            int height = 64 * Zoom + Gap * 2;
+
+            using (Bitmap sheet = new Bitmap(width, height))
+            using (Graphics g = Graphics.FromImage(sheet))
+            {
+                g.Clear(Color.FromArgb(245, 245, 247));
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+
+                int x = Gap;
+                using (Icon icon = Create(false))
+                {
+                    for (int i = 0; i < sizes.Length; i++)
+                    {
+                        // new Icon(icon, size) picks the closest frame and
+                        // scales exactly as the shell would.
+                        using (Icon scaled = new Icon(icon, new Size(sizes[i], sizes[i])))
+                        using (Bitmap bmp = scaled.ToBitmap())
+                        {
+                            g.DrawImage(bmp, x, Gap, sizes[i] * Zoom, sizes[i] * Zoom);
+                        }
+                        x += sizes[i] * Zoom + Gap;
+                    }
+                }
+                sheet.Save(pngPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+        }
+
+        /// <summary>
+        /// A four-point star with concave sides.
+        ///
+        /// Each side is one bezier from tip to tip whose control points sit
+        /// close to the centre — that is what pulls the edges inward and makes
+        /// the points sharp. Straight lines between the tips would give a plain
+        /// diamond, which reads as a shape rather than as a sparkle.
+        /// </summary>
+        private static GraphicsPath SparklePath(float cx, float cy, float radius)
+        {
+            float waist = radius * 0.22f;
+            PointF north = new PointF(cx, cy - radius);
+            PointF east = new PointF(cx + radius, cy);
+            PointF south = new PointF(cx, cy + radius);
+            PointF west = new PointF(cx - radius, cy);
+
+            GraphicsPath path = new GraphicsPath();
+            path.AddBezier(north, new PointF(cx, cy - waist), new PointF(cx + waist, cy), east);
+            path.AddBezier(east, new PointF(cx + waist, cy), new PointF(cx, cy + waist), south);
+            path.AddBezier(south, new PointF(cx, cy + waist), new PointF(cx - waist, cy), west);
+            path.AddBezier(west, new PointF(cx - waist, cy), new PointF(cx, cy - waist), north);
+            path.CloseFigure();
+            return path;
         }
 
         private static GraphicsPath RoundedRect(Rectangle bounds, int radius)

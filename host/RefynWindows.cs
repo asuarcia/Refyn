@@ -112,6 +112,7 @@ namespace Refyn
         private ThemedTextBox portBox;
         private ThemedSelect styleBox;
         private ThemedCheck autostartBox;
+        private ThemedCheck rememberBox;
         private Label status;
         private FlatButton saveButton;
 
@@ -129,7 +130,7 @@ namespace Refyn
             // Height is derived from the layout below, not guessed. The first
             // version was 618 and silently clipped the Port field and the Save
             // button off the bottom of the window.
-            ClientSize = new Size(520, 726);
+            ClientSize = new Size(520, 798);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             Icon = TrayIconFactory.Create(false);
 
@@ -199,7 +200,7 @@ namespace Refyn
             // and giving it a whole row of its own pushed the window past the
             // height a laptop screen can show.
             int styleWidth = width - 130;
-            Caption("Default style", x, y, true);
+            Caption("Default mode", x, y, true);
             Caption("Port", x + styleWidth + 20, y, true);
             y += 20;
 
@@ -216,6 +217,19 @@ namespace Refyn
             portBox.Value = config.Port.ToString(CultureInfo.InvariantCulture);
             Controls.Add(portBox);
             y += 46;
+
+            rememberBox = new ThemedCheck(Palette, "Remember the last mode I pick instead");
+            rememberBox.Location = new Point(x, y);
+            rememberBox.Size = new Size(width, 26);
+            rememberBox.Font = Font;
+            rememberBox.Checked = config.RememberLastMode;
+            Controls.Add(rememberBox);
+            y += 30;
+
+            Label modeHint = Caption("Off: every rewrite uses the default mode above, and the style\npicker is a one-off. On: picking a style makes it the new default.",
+                                     x + 26, y, true);
+            modeHint.Font = new Font("Segoe UI", 8.5f);
+            y += 42;
 
             autostartBox = new ThemedCheck(Palette, "Start Refyn when I sign in");
             autostartBox.Location = new Point(x, y);
@@ -398,6 +412,7 @@ namespace Refyn
                 config.HotkeyStyles = stylesKey.Combo;
                 config.ThemePreference = ThemeAt(themeChoice.SelectedIndex);
                 config.DefaultStyle = chosen != null ? chosen.Id : config.DefaultStyle;
+                config.RememberLastMode = rememberBox.Checked;
                 config.Port = port;
                 config.Save();
 
