@@ -173,6 +173,45 @@ async function stopHost() {
  * the single-instance guard is what turns a second launch into a remote
  * control rather than a duplicate tray icon.
  */
+/**
+ * `refyn launch` — the front door.
+ *
+ * Starts the daemon and the tray host (so Ctrl+Alt+P works from here on) and
+ * opens the full window, which carries both Compose and Settings. This is what
+ * a first-time user should run: it makes the hotkey live AND shows them the app.
+ */
+async function cmdLaunch() {
+  if (process.platform !== "win32") {
+    console.log(c.yellow("!") + " the Refyn window is Windows-only; `refyn rewrite` still works here.");
+    return;
+  }
+  if (!existsSync(HOST_EXE)) {
+    console.log(c.dim("first run - building the tray host"));
+    if (!(await buildHost())) return;
+  }
+  if (!(await daemonHealth())) {
+    if (!(await startDaemon())) return;
+  }
+  if (!(await hostRunning())) {
+    await startHost();
+    await sleep(1200);
+  }
+  openHostWindow("--launch");
+  console.log(`${c.green("+")} Refyn is running - ${c.bold("Ctrl+Alt+P")} rewrites whatever you have selected`);
+}
+
+/**
+ * Ask the running tray host to show a window.
+ *
+ * Launching the exe again does not start a second copy: the single-instance
+ * guard turns the duplicate into a broadcast to the copy already running, and
+ * the new process exits immediately.
+ */
+function openHostWindow(flag) {
+  const child = spawn(HOST_EXE, [flag], { detached: true, stdio: "ignore", windowsHide: true });
+  child.unref();
+}
+
 async function cmdSettings() {
   if (process.platform !== "win32") {
     console.log(c.yellow("!") + " the settings window is Windows-only. Edit .env and " + CONFIG_FILE + " directly.");
@@ -188,8 +227,7 @@ async function cmdSettings() {
     await startHost();
     await sleep(1200);
   }
-  const child = spawn(HOST_EXE, ["--settings"], { detached: true, stdio: "ignore", windowsHide: true });
-  child.unref();
+  openHostWindow("--settings");
   console.log(c.green("+") + " settings window opened");
 }
 
@@ -391,14 +429,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function usage() {
   console.log(`${c.bold("refyn")} — always-on prompt rewriter
 
-  ${c.bold("start")}                 start the daemon and the tray host
+  ${c.bold("launch")}                start Refyn and open the full window
+  ${c.bold("settings")}              open just the settings window
+  ${c.bold("start")}                 start in the background only, no window
   ${c.bold("stop")}                  stop both
   ${c.bold("restart")}               stop, then start
   ${c.bold("status")}                what is running, and an end-to-end key check
   ${c.bold("rewrite")} <text>        rewrite from here; also reads stdin
                         ${c.dim("-s, --style <id>   improve | concise | technical | code |")}
                         ${c.dim("                   reasoning | creative | socratic")}
-  ${c.bold("settings")}              open the settings window (theme, hotkeys, model)
   ${c.bold("history")} [n]           recent rewrites
   ${c.bold("build")}                 recompile the tray host
   ${c.bold("autostart")} on|off      run at logon
@@ -420,6 +459,7 @@ switch (command) {
   case "status": await cmdStatus(); break;
   case "rewrite": await cmdRewrite(rest); break;
   case "history": await cmdHistory(rest); break;
+  case "launch": await cmdLaunch(); break;
   case "settings": case "config": await cmdSettings(); break;
   case "build": await buildHost(); break;
   case "autostart": await setAutostart(rest[0] !== "off"); break;

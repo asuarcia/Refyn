@@ -13,6 +13,8 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -27,6 +29,18 @@ namespace Refyn
     internal class ThemedForm : Form
     {
         protected Theme Palette;
+
+        /// <summary>
+        /// Set by the --dump-ui design aid. While true, windows are shown
+        /// without taking activation, so a screenshot pass cannot steal focus
+        /// from whatever the user is actually doing.
+        /// </summary>
+        internal static bool DumpMode;
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return DumpMode; }
+        }
 
         protected ThemedForm(Theme theme)
         {
@@ -92,6 +106,283 @@ namespace Refyn
             label.Tag = dim ? "dim" : "body";
             Controls.Add(label);
             return label;
+        }
+    }
+
+    // -------------------------------------------------------- UI design aid
+
+    /// <summary>
+    /// Renders a window to a PNG without ever showing it to the user.
+    ///
+    /// The window is parked far off-screen and shown without activation, so it
+    /// takes no focus and appears on no monitor; PrintWindow with
+    /// PW_RENDERFULLCONTENT then captures it. This exists because the honest way
+    /// to check a layout is to look at it, and the previous way of doing that —
+    /// opening the real window on the real desktop — interrupted whoever was
+    /// using the machine.
+    /// </summary>
+    internal static class UiDump
+    {
+        private const uint PW_RENDERFULLCONTENT = 2;
+
+        [DllImport("user32.dll")]
+        private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+
+        public static void Render(string which, string pngPath)
+        {
+            ThemedForm.DumpMode = true;
+
+            Config config = Config.Load();
+            Theme theme = Theme.Resolve(config.ThemePreference);
+            DaemonClient daemon = new DaemonClient(config.Port);
+            List<StyleInfo> styles = StyleInfo.Fallback();
+
+            Form target;
+            ComposeForm compose = new ComposeForm(theme, daemon, styles);
+            SettingsForm settings = new SettingsForm(theme, config, daemon, null);
+
+            if (which == "compose") { target = compose; }
+            else if (which == "settings") { target = settings; }
+            else
+            {
+                MainWindow window = new MainWindow(theme, daemon, compose, settings);
+                // "main-settings" renders the main window showing its Settings
+                // page — the combination most likely to clip, since Settings is
+                // the tallest page.
+                if (which == "main-settings") { window.GoTo(settings); }
+                target = window;
+            }
+
+            target.StartPosition = FormStartPosition.Manual;
+            target.Location = new Point(-6000, -6000);
+            target.Show();
+
+            // Let layout settle and any async daemon fetch land. DoEvents keeps
+            // the pump running without Application.Run, which would not return.
+            for (int i = 0; i < 60; i++)
+            {
+                Application.DoEvents();
+                Thread.Sleep(50);
+            }
+
+            using (Bitmap bitmap = new Bitmap(target.Width, target.Height))
+            {
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    IntPtr hdc = g.GetHdc();
+                    try { PrintWindow(target.Handle, hdc, PW_RENDERFULLCONTENT); }
+                    finally { g.ReleaseHdc(hdc); }
+                }
+                bitmap.Save(pngPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            Console.WriteLine("wrote " + pngPath);
+        }
+    }
+
+    // ------------------------------------------------------------ main window
+
+    /// <summary>
+    /// The window `refyn launch` opens: everything in one place, with Compose
+    /// and Settings as pages behind a left rail.
+    ///
+    /// The two pages are the existing ComposeForm and SettingsForm, embedded as
+    /// child controls (TopLevel = false). Reusing them rather than reimplementing
+    /// their contents means `refyn settings` and this window can never drift
+    /// apart — they are literally the same code, shown in a different frame.
+    /// </summary>
+    internal sealed class MainWindow : ThemedForm
+    {
+        private readonly Panel content;
+        private readonly List<FlatButton> navButtons = new List<FlatButton>();
+        private readonly Label statusDot;
+        private readonly Label statusText;
+        private readonly DaemonClient daemon;
+        private Form currentPage;
+
+        public MainWindow(Theme theme, DaemonClient client, Form composePage, Form settingsPage)
+            : base(theme)
+        {
+            daemon = client;
+
+            Text = "Refyn";
+            Icon = TrayIconFactory.Create(false);
+            FormBorderStyle = FormBorderStyle.Sizable;
+            // Tall enough that the Settings page fits without scrolling on a
+            // 1080p screen; AutoScroll on the content panel covers the rest.
+            ClientSize = new Size(880, 838);
+            MinimumSize = new Size(760, 560);
+            ShowInTaskbar = true; // this one is a real window the user opened
+
+            const int RailWidth = 186;
+
+            Panel rail = new Panel();
+            rail.Dock = DockStyle.Left;
+            rail.Width = RailWidth;
+            rail.BackColor = theme.Surface;
+            Controls.Add(rail);
+
+            Label brand = new Label();
+            brand.Text = "Refyn";
+            brand.Font = new Font("Segoe UI", 15f, FontStyle.Regular, GraphicsUnit.Point);
+            brand.ForeColor = theme.Text;
+            brand.BackColor = Color.Transparent;
+            brand.AutoSize = true;
+            brand.Location = new Point(22, 24);
+            rail.Controls.Add(brand);
+
+            Label tagline = new Label();
+            tagline.Text = "Ctrl+Alt+P rewrites\nwhatever you select.";
+            tagline.Font = new Font("Segoe UI", 8.5f);
+            tagline.ForeColor = theme.TextDim;
+            tagline.BackColor = Color.Transparent;
+            tagline.AutoSize = true;
+            tagline.Location = new Point(22, 56);
+            rail.Controls.Add(tagline);
+
+            content = new Panel();
+            content.Dock = DockStyle.Fill;
+            content.BackColor = theme.Bg;
+            // The Settings page is a fixed 798px tall — taller than this window
+            // on a small screen. Without AutoScroll its Save button is simply
+            // cut off, with nothing to indicate there is more below.
+            content.AutoScroll = true;
+            Controls.Add(content);
+            content.BringToFront();
+
+            AddNav(rail, "Rewrite", 108, composePage);
+            AddNav(rail, "Settings", 152, settingsPage);
+
+            // Live status, bottom of the rail.
+            statusDot = new Label();
+            statusDot.Text = "●";
+            statusDot.Font = new Font("Segoe UI", 11f);
+            statusDot.ForeColor = theme.TextDim;
+            statusDot.BackColor = Color.Transparent;
+            statusDot.AutoSize = true;
+            statusDot.Location = new Point(22, ClientSize.Height - 62);
+            statusDot.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            rail.Controls.Add(statusDot);
+
+            statusText = new Label();
+            statusText.Text = "checking…";
+            statusText.Font = new Font("Segoe UI", 8.5f);
+            statusText.ForeColor = theme.TextDim;
+            statusText.BackColor = Color.Transparent;
+            statusText.AutoSize = true;
+            statusText.MaximumSize = new Size(RailWidth - 56, 0);
+            statusText.Location = new Point(40, ClientSize.Height - 60);
+            statusText.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            rail.Controls.Add(statusText);
+
+            Show(composePage);
+            RefreshStatusAsync();
+        }
+
+        private void AddNav(Panel rail, string label, int y, Form page)
+        {
+            FlatButton button = new FlatButton();
+            button.Text = label;
+            button.Palette = Palette;
+            button.Font = Font;
+            button.Size = new Size(rail.Width - 44, 36);
+            button.Location = new Point(22, y);
+            button.Tag = page;
+            button.Click += delegate { Show(page); };
+            rail.Controls.Add(button);
+            navButtons.Add(button);
+        }
+
+        /// <summary>Swap the visible page. Pages are kept alive, not recreated.</summary>
+        private void Show(Form page)
+        {
+            if (page == null || page == currentPage) { return; }
+
+            if (currentPage != null) { currentPage.Visible = false; }
+
+            if (!content.Controls.Contains(page))
+            {
+                // A Form can live inside another control once it stops being a
+                // top-level window. Its own border and title bar must go, or it
+                // renders a window frame in the middle of the page.
+                page.TopLevel = false;
+                page.FormBorderStyle = FormBorderStyle.None;
+                page.Dock = DockStyle.Fill;
+                page.ControlBox = false;
+                content.Controls.Add(page);
+            }
+
+            page.Visible = true;
+            page.BringToFront();
+            currentPage = page;
+
+            foreach (FlatButton button in navButtons)
+            {
+                button.Primary = ReferenceEquals(button.Tag, page);
+            }
+        }
+
+        private async void RefreshStatusAsync()
+        {
+            try
+            {
+                DaemonSettings settings = await daemon.GetSettingsAsync();
+                if (settings == null)
+                {
+                    statusDot.ForeColor = Palette.Danger;
+                    statusText.Text = "daemon not running\nhotkeys will not work";
+                    return;
+                }
+                statusDot.ForeColor = Color.FromArgb(64, 178, 108);
+                statusText.Text = settings.KeyConfigured
+                    ? "ready\n" + ShortModel(settings.Model)
+                    : "no API key set\nadd one in Settings";
+                if (!settings.KeyConfigured) { statusDot.ForeColor = Palette.Danger; }
+            }
+            catch
+            {
+                statusDot.ForeColor = Palette.Danger;
+                statusText.Text = "daemon unreachable";
+            }
+        }
+
+        /// <summary>
+        /// Vendor prefix dropped and length capped, because the rail is narrow
+        /// and a long id wraps mid-word into something like "…flash-073 / 1".
+        /// </summary>
+        private static string ShortModel(string model)
+        {
+            if (string.IsNullOrEmpty(model)) { return ""; }
+            int slash = model.LastIndexOf('/');
+            string name = slash >= 0 ? model.Substring(slash + 1) : model;
+            return name.Length > 20 ? name.Substring(0, 19) + "…" : name;
+        }
+
+        /// <summary>Is this page hosted here? Governs where the CLI routes.</summary>
+        public bool Owns(Form page)
+        {
+            return page != null && content.Controls.Contains(page);
+        }
+
+        /// <summary>Bring the window forward on a given page.</summary>
+        public void GoTo(Form page)
+        {
+            Show(page);
+            // During an off-screen dump the window must not be brought forward;
+            // that is the whole point of dump mode.
+            if (!ThemedForm.DumpMode) { Open(); }
+        }
+
+        public void Open()
+        {
+            if (!Visible)
+            {
+                CentreOnCursor();
+                Show();
+            }
+            if (WindowState == FormWindowState.Minimized) { WindowState = FormWindowState.Normal; }
+            Native.ForceForeground(Handle);
+            Activate();
+            RefreshStatusAsync();
         }
     }
 
@@ -585,7 +876,13 @@ namespace Refyn
             Controls.Add(copyButton);
         }
 
-        public void Open(IntPtr previousWindow, string preferredStyle)
+        /// <summary>
+        /// Set the window up without showing it. Split out from Open so the
+        /// main window can host this form as a page — an embedded form is not a
+        /// top-level window, and calling Show/ForceForeground on one puts a
+        /// frameless panel at the screen origin.
+        /// </summary>
+        public void Prepare(IntPtr previousWindow, string preferredStyle)
         {
             returnTo = previousWindow;
             pasteButton.Enabled = previousWindow != IntPtr.Zero;
@@ -605,6 +902,11 @@ namespace Refyn
                 }
             }
 
+        }
+
+        public void Open(IntPtr previousWindow, string preferredStyle)
+        {
+            Prepare(previousWindow, preferredStyle);
             CentreOnCursor();
             Show();
             Native.ForceForeground(Handle);

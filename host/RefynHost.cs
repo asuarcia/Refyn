@@ -35,6 +35,26 @@ namespace Refyn
         [STAThread]
         private static void Main(string[] args)
         {
+            // Design aids run before anything else — before the single-instance
+            // guard especially. They are standalone tools, not another copy of
+            // the app, and putting them after the guard meant that with the tray
+            // already running they fell through to the "Refyn is already
+            // running" MessageBox: a modal dialog on the user's screen from a
+            // command whose entire purpose was to render off-screen.
+            if (Array.IndexOf(args, "--dump-icon") >= 0)
+            {
+                TrayIconFactory.Dump(args[Array.IndexOf(args, "--dump-icon") + 1]);
+                return;
+            }
+            if (Array.IndexOf(args, "--dump-ui") >= 0)
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                int at = Array.IndexOf(args, "--dump-ui");
+                UiDump.Render(args[at + 1], args[at + 2]);
+                return;
+            }
+
             bool createdNew;
             using (Mutex instanceLock = new Mutex(true, "Global\\RefynHost", out createdNew))
             {
@@ -50,18 +70,14 @@ namespace Refyn
                         Native.PostMessage(Native.HWND_BROADCAST, Native.ShowSettingsMessage, IntPtr.Zero, IntPtr.Zero);
                         return;
                     }
+                    if (Array.IndexOf(args, "--launch") >= 0)
+                    {
+                        Native.PostMessage(Native.HWND_BROADCAST, Native.ShowMainMessage, IntPtr.Zero, IntPtr.Zero);
+                        return;
+                    }
                     MessageBox.Show(
                         "Refyn is already running. Look for the tray icon near the clock.",
                         "Refyn", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-
-                // Icon design aid: render the real icon at the sizes Windows
-                // actually uses and exit. Eyeballing a 64px bitmap is how you
-                // ship a mark that turns into a blob in the tray.
-                if (Array.IndexOf(args, "--dump-icon") >= 0)
-                {
-                    TrayIconFactory.Dump(args[Array.IndexOf(args, "--dump-icon") + 1]);
                     return;
                 }
 
@@ -99,6 +115,7 @@ namespace Refyn
         private ContextMenuStrip stylePicker;
         private ComposeForm compose;
         private SettingsForm settings;
+        private MainWindow main;
         private Theme palette;
 
         private List<StyleInfo> styles;
@@ -278,6 +295,7 @@ namespace Refyn
             {
                 Log.Write("hotkey " + id + " received");
                 if (id == 0) { ShowSettings(); }
+                else if (id == -1) { ShowMain(); }
                 else if (id == HotkeyImprove) { ImproveSelection(null, Native.GetForegroundWindow()); }
                 else if (id == HotkeyCompose) { ShowCompose(Native.GetForegroundWindow()); }
                 else if (id == HotkeyStyles) { ShowStylePicker(); }
@@ -470,18 +488,62 @@ namespace Refyn
 
         private void ShowCompose(IntPtr returnTo)
         {
+            string style = config.RememberLastMode ? lastStyle : config.DefaultStyle;
+
             if (compose == null || compose.IsDisposed)
             {
                 compose = new ComposeForm(palette, daemon, styles);
             }
-            compose.Open(returnTo, config.RememberLastMode ? lastStyle : config.DefaultStyle);
+
+            // Once Compose is a page inside the main window it is no longer a
+            // top-level window, so showing it on its own would render a frameless
+            // panel floating at the origin. Route to the main window instead.
+            if (main != null && !main.IsDisposed && main.Owns(compose))
+            {
+                compose.Prepare(returnTo, style);
+                main.GoTo(compose);
+                return;
+            }
+            compose.Open(returnTo, style);
+        }
+
+        /// <summary>
+        /// The `refyn launch` window: Compose and Settings behind one frame.
+        ///
+        /// Compose and Settings are the same instances the standalone commands
+        /// use. Once a page is embedded in the main window it belongs to it, so
+        /// `refyn settings` while the main window is open brings that window
+        /// forward on the Settings page rather than tearing the page out of it.
+        /// </summary>
+        private void ShowMain()
+        {
+            palette = Theme.Resolve(config.ThemePreference);
+
+            if (main == null || main.IsDisposed)
+            {
+                if (compose == null || compose.IsDisposed) { compose = new ComposeForm(palette, daemon, styles); }
+                if (settings == null || settings.IsDisposed)
+                {
+                    settings = new SettingsForm(palette, config, daemon, OnSettingsSaved);
+                }
+                main = new MainWindow(palette, daemon, compose, settings);
+            }
+            main.Open();
         }
 
         private void ShowSettings()
         {
-            // Rebuilt each time rather than reused: the theme, the style list
-            // and the daemon's model settings can all have changed since it was
-            // last shown, and a stale settings window is worse than none.
+            // If the main window owns the Settings page, go there rather than
+            // tearing the page out of it.
+            if (main != null && !main.IsDisposed && settings != null && main.Owns(settings))
+            {
+                main.GoTo(settings);
+                return;
+            }
+
+            // Standalone: rebuilt each time rather than reused, because the
+            // theme, the style list and the daemon's model settings can all have
+            // changed since it was last shown.
             if (settings != null && !settings.IsDisposed)
             {
                 settings.Close();
@@ -502,10 +564,16 @@ namespace Refyn
             palette = Theme.Resolve(updated.ThemePreference);
             lastStyle = updated.DefaultStyle;
             tray.Icon = TrayIconFactory.Create(paused);
-            if (compose != null && !compose.IsDisposed)
+
+            // Rebuild Compose so it picks up a new palette — but only when it is
+            // standalone. Disposing a page the main window is hosting would
+            // leave a hole in that window; there the new theme lands on the next
+            // launch instead.
+            bool embedded = main != null && !main.IsDisposed && compose != null && main.Owns(compose);
+            if (!embedded && compose != null && !compose.IsDisposed)
             {
                 compose.Dispose();
-                compose = null; // rebuilt with the new palette on next open
+                compose = null;
             }
         }
 
@@ -556,9 +624,14 @@ namespace Refyn
             }
             else if (m.Msg == Native.ShowSettingsMessage)
             {
-                // Hotkey id 0 is not registrable, so it is free to mean
-                // "open settings" without widening the callback signature.
+                // Hotkey ids 0 and -1 are not registrable, so they are free to
+                // mean "open settings" and "open the main window" without
+                // widening the callback signature.
                 onHotkey(0);
+            }
+            else if (m.Msg == Native.ShowMainMessage)
+            {
+                onHotkey(-1);
             }
             base.WndProc(ref m);
         }
@@ -1522,6 +1595,7 @@ namespace Refyn
         /// a broadcast from a second instance land on the first.
         /// </summary>
         public static readonly int ShowSettingsMessage = RegisterWindowMessage("RefynShowSettings");
+        public static readonly int ShowMainMessage = RegisterWindowMessage("RefynShowMain");
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int RegisterWindowMessage(string message);
