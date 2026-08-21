@@ -45,7 +45,9 @@ node refyn.mjs start
 ```
 
 `start` builds the tray host on first run, launches the daemon, and puts a
-**P** in your system tray.
+sparkle icon in your system tray. Windows 11 hides new tray icons by default —
+if you do not see it, click the **^** chevron next to the clock, and drag it
+out to pin it.
 
 To have it come back after a reboot:
 
@@ -59,7 +61,7 @@ node refyn.mjs autostart on
 
 | Key | What it does |
 |---|---|
-| `Ctrl+Alt+P` | Rewrite the selected text in place, using the last style |
+| `Ctrl+Alt+P` | Rewrite the selected text in place, using your default mode |
 | `Ctrl+Alt+O` | Open the compose window |
 | `Ctrl+Alt+L` | Pick a style for the current selection |
 
@@ -205,10 +207,6 @@ every app on the machine able to steal focus.
 
 When something goes wrong, `%APPDATA%\Refyn\host.log` has one line per step of
 the last session — the only way to see inside a tray app with no console.
-
-When something goes wrong, `%APPDATA%\Refyn\host.log` has one line per
-step of the last session, which is the only way to see inside a tray app with
-no console.
 
 ---
 
