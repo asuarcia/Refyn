@@ -77,8 +77,18 @@ Three ways in, all the same window:
 - double-click the tray icon opens Compose; Settings is one menu item away
 
 It covers hotkeys (click a field and press the combination you want), theme,
-the model and API key, the default style, the port, and run-at-login. Hotkey
+the model and API key, the **default mode**, the port, and run-at-login. Hotkey
 changes take effect on the next launch; everything else applies immediately.
+
+### Default mode
+
+The style every rewrite starts from. `Ctrl+Alt+L` picks a different one for a
+single rewrite without changing the default.
+
+If you would rather the picker be sticky — pick `concise` once and stay there —
+tick **Remember the last mode I pick instead**. That was the original behaviour
+and it was wrong as a default: it silently retired the mode you had configured,
+which made the setting look broken.
 
 Settings are split across two files by owner, and the window writes both:
 
@@ -162,16 +172,39 @@ The daemon binds to `127.0.0.1` only and refuses any request carrying an
 
 ## Testing
 
+Two suites, split by whether they touch your screen.
+
+**Quiet — run these any time.** No windows, no focus stealing.
+
 ```bash
-node --test test/*.test.mjs                                     # daemon logic
-powershell -ExecutionPolicy Bypass -File test/e2e-hotkey.ps1    # the real hotkey
+node --test test/daemon.test.mjs    # 16 unit tests: styles, cleanup, .env parsing
+node test/smoke.mjs                 # 17 live checks: daemon routes, a real
+                                    # rewrite in all 7 styles, host + hotkeys
 ```
 
-The end-to-end test opens Notepad, selects text, presses the actual global
-hotkey, and asserts the window ends up holding exactly what the daemon
-returned. It verifies its own preconditions first: if it cannot prove it
-selected text, it reports a harness failure rather than blaming the app — an
-earlier version did the opposite and produced a confident false PASS.
+`smoke.mjs` asserts the things that actually matter: that the model *rewrote*
+the prompt instead of answering it, that `concise` really does come back
+shorter, and that `/settings` never returns the API key.
+
+**Loud — takes over the machine.** Opt-in, and it tells you so if you forget:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File test/e2e-hotkey.ps1 -TakeOverMyDesktop
+```
+
+This is the only way to cover SendInput, the modifier release and the clipboard
+hand-off, because none of them work without a real focused window. It opens
+Notepad, forces it to the foreground and types into it for about a minute — run
+it when you are away from the keyboard.
+
+It verifies its own preconditions first: if it cannot prove it selected text, it
+reports a *harness* failure rather than blaming the app. An earlier version did
+the opposite and produced a confident false PASS. It also restores the system
+foreground-lock timeout on every exit path, having once left it at zero and made
+every app on the machine able to steal focus.
+
+When something goes wrong, `%APPDATA%\Refyn\host.log` has one line per step of
+the last session — the only way to see inside a tray app with no console.
 
 When something goes wrong, `%APPDATA%\Refyn\host.log` has one line per
 step of the last session, which is the only way to see inside a tray app with
